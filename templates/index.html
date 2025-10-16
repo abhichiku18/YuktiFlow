@@ -1,0 +1,226 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>YuktiFlow AI Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+  <div class="topbar">
+    <div class="logo">
+      <img src="{{ url_for('static', filename='logo.png') }}" alt="YuktiFlow Logo" class="logo">
+      <h1>YuktiFlow</h1>
+    </div>
+    <div class="sections">
+      <span>Sales Forecasting</span>
+      <span>Demand Prediction</span>
+      <span>Stockout Risk Detection</span>
+      <span>Fast/Slow Product Detection</span>
+    </div>
+  </div>
+
+  <main class="main-grid">
+    <section class="card upload">
+      <h2>Upload CSV for Predictions</h2>
+      <input id="csv_file" type="file" accept=".csv" />
+      <div class="row">
+        <button id="btnPredict" onclick="uploadCSV()">Predict</button>
+        <button id="btnDownload" onclick="downloadPreds()" disabled>Download Predictions CSV</button>
+      </div>
+      <div id="warnings" class="warnings"></div>
+    </section>
+
+    <section class="card chart" id="prophetCard">
+      <h2>📈 Sales Forecast (Prophet)</h2>
+      <div id="prophetChart" class="plot"></div>
+    </section>
+
+    <section class="card chart" id="modelsCard">
+      <h2>📊 Model Predictions Overview</h2>
+      <div id="modelsChart" class="plot"></div>
+    </section>
+
+    <section class="card tablecard">
+      <h2>🧾 Predictions Table</h2>
+      <div class="table-wrap">
+        <table id="prediction_table">
+          <thead>
+            <tr id="tableHead"></tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+<script>
+let lastResult = null;
+
+function formatDateShort(dstr){
+  try {
+    const d = new Date(dstr);
+    return d.toLocaleDateString();
+  } catch(e){
+    return dstr;
+  }
+}
+
+async function uploadCSV(){
+  const input = document.getElementById('csv_file');
+  document.getElementById('warnings').innerHTML = '';
+  if(!input.files || input.files.length === 0){
+    alert('Please upload a CSV file first.');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+
+  document.getElementById('btnPredict').disabled = true;
+  document.getElementById('btnPredict').innerText = 'Processing...';
+
+  try {
+    const res = await fetch('/predict_csv', { method: 'POST', body: fd });
+    const data = await res.json();
+    lastResult = data;
+
+    // show warnings (encoders fitted etc.)
+    const warnDiv = document.getElementById('warnings');
+    warnDiv.innerHTML = '';
+    if(data.meta && data.meta.encoder_used_warning && data.meta.encoder_used_warning.length){
+      data.meta.encoder_used_warning.forEach(w=>{
+        const p = document.createElement('p');
+        p.className = 'warn';
+        p.innerText = '⚠️ ' + w;
+        warnDiv.appendChild(p);
+      });
+    }
+
+    // Prophet chart
+    if(Array.isArray(data.prophet) && data.prophet.length){
+      const trace = {
+        x: data.prophet.map(r=>r.ds),
+        y: data.prophet.map(r=>r.yhat),
+        mode: 'lines+markers',
+        name: 'Forecast'
+      };
+      const layout = { margin:{t:20, b:60}, xaxis:{tickangle: -45} };
+      Plotly.newPlot('prophetChart',[trace], layout, {responsive:true});
+    } else {
+      document.getElementById('prophetChart').innerHTML = '<p class="muted">No Prophet output (need Date & Units_Sold columns)</p>';
+    }
+
+    // Combined models chart: plot RF values and show counts for LogReg and KMeans via markers
+    if(data.table && data.table.length){
+      const rows = data.table.map((r,i)=>i+1);
+      const rf = data.table.map(r => r.RF_Prediction === null ? null : Number(r.RF_Prediction));
+      const log = data.table.map(r => r.LogReg_Prediction);
+      const km = data.table.map(r => r.KMeans_Prediction);
+
+      const traces = [
+        { x: rows, y: rf, mode:'lines+markers', name:'Random Forest (Units)', yaxis:'y1' }
+      ];
+      // for Logistic - show as colored markers above line
+      traces.push({ x: rows.filter((_,i)=>log[i]!==null), y: rows.filter((_,i)=>log[i]!==null).map((_,i,arrIdx)=> {
+          // place markers a bit above baseline for visualization
+          return Math.max(...(rf.filter(v=>v!==null)) || [1]) * 1.05;
+        }),
+        mode:'markers',
+        marker:{size:10, color: log.map(v=> v==='High'? 'crimson' : 'green')},
+        name:'Stockout Risk (High=red, Low=green)',
+        hovertext: log
+      });
+      // KMeans: show color-coded markers at top
+      traces.push({
+        x: rows.filter((_,i)=>km[i]!==null),
+        y: rows.filter((_,i)=>km[i]!==null).map(()=>Math.max(...(rf.filter(v=>v!==null)) || [1]) * 1.12),
+        mode:'markers',
+        marker:{size:8, symbol:'diamond', color: km.map(v=> v==='Fast Moving' ? '#ff9900' : '#999')},
+        name:'KMeans (Fast=orange)'
+      });
+
+      const layout = {
+        margin:{t:10,b:40},
+        xaxis:{title:'Row'},
+        yaxis:{title:'Units / scale'},
+        showlegend:true
+      };
+      Plotly.newPlot('modelsChart', traces, layout, {responsive:true});
+    } else {
+      document.getElementById('modelsChart').innerHTML = '<p class="muted">No model predictions available to plot.</p>';
+    }
+
+    // build table (use headers from first record)
+    const tableHead = document.getElementById('tableHead');
+    const tableBody = document.getElementById('tableBody');
+    tableHead.innerHTML = '';
+    tableBody.innerHTML = '';
+
+    if(data.table && data.table.length){
+      const first = data.table[0];
+      const headers = Object.keys(first);
+      // make headers prettier
+      headers.forEach(h=>{
+        const th = document.createElement('th');
+        th.innerText = h.replace(/_/g,' ');
+        tableHead.appendChild(th);
+      });
+
+      data.table.forEach((row, idx)=>{
+        const tr = document.createElement('tr');
+        headers.forEach(h=>{
+          const td = document.createElement('td');
+          let val = row[h];
+          // show human-friendly labels
+          if(h === 'LogReg_Prediction'){
+            if(val === null || val === undefined) val = '';
+            // if log predictions are numeric (0/1) convert
+            if(val === 0) val = 'Low';
+            else if(val === 1) val = 'High';
+          }
+          td.innerText = (val === null || val === undefined) ? '' : val;
+          tr.appendChild(td);
+        });
+        tableBody.appendChild(tr);
+      });
+      document.getElementById('btnDownload').disabled = false;
+    } else {
+      tableHead.innerHTML = '<th>No data</th>';
+      tableBody.innerHTML = '<tr><td>No rows</td></tr>';
+      document.getElementById('btnDownload').disabled = true;
+    }
+
+  } catch (err) {
+    alert('Prediction failed: ' + err);
+    console.error(err);
+  } finally {
+    document.getElementById('btnPredict').disabled = false;
+    document.getElementById('btnPredict').innerText = 'Predict';
+  }
+}
+
+async function downloadPreds(){
+  if(!lastResult || !lastResult.table) { alert('No predictions to download'); return; }
+  // call server endpoint to get CSV (server expects JSON with table)
+  const res = await fetch('/download_predictions', {
+    method:'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({table: lastResult.table})
+  });
+  if(res.ok){
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'predictions_with_models.csv';
+    a.click();
+  } else {
+    const txt = await res.text();
+    alert('Download error: ' + txt);
+  }
+}
+</script>
+</body>
+</html>
