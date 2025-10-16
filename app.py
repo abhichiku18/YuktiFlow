@@ -69,18 +69,12 @@ def map_kmeans_clusters(labels, df_units):
     mapped = [mapping.get(int(c), 'Unknown') for c in labels]
     return mapped, mapping
 
-
-# -------------------------
-# Global JSON error handler
-# -------------------------
 @app.errorhandler(Exception)
 def handle_exception(e):
     return jsonify({"error": str(e)}), 500
 
 
-# -------------------------
 # Routes
-# -------------------------
 @app.route('/')
 def home():
     return render_template('index.html')
@@ -101,7 +95,7 @@ def predict_csv():
     response_meta = {"encoder_used_warning": []}
     results = {}
 
-    # ---------- Prophet forecast ----------
+    # Prophet forecast 
     try:
         if ('Date' in df.columns) and ('Units_Sold' in df.columns):
             df_prophet = df[['Date', 'Units_Sold']].rename(columns={'Date': 'ds', 'Units_Sold': 'y'})
@@ -119,7 +113,7 @@ def predict_csv():
         results['prophet'] = []
         response_meta["encoder_used_warning"].append(f"Prophet error: {e}")
 
-    # ---------- Random Forest ----------
+    # Random Forest 
     rf_preds = []
     try:
         if set(['Product', 'Area', 'Stockout_Risk']).issubset(df.columns):
@@ -148,7 +142,7 @@ def predict_csv():
 
     results['rf'] = rf_preds
 
-    # ---------- Logistic Regression ----------
+    #Logistic Regression 
     log_preds = []
     log_labels = []
     try:
@@ -175,7 +169,7 @@ def predict_csv():
     results['log_numeric'] = log_preds
     results['log'] = log_labels
 
-    # ---------- KMeans ----------
+    # KMeans 
     km_preds = []
     km_labels = []
     try:
@@ -192,7 +186,7 @@ def predict_csv():
     results['kmeans_numeric'] = km_preds
     results['kmeans'] = km_labels
 
-    # ---------- Build Output Table ----------
+    # Build Output Table 
     out_df = df_display.copy()
     out_df['RF_Prediction'] = rf_preds if len(rf_preds) == len(out_df) else [None]*len(out_df)
     out_df['LogReg_Prediction'] = log_labels if len(log_labels) == len(out_df) else [None]*len(out_df)
@@ -201,7 +195,7 @@ def predict_csv():
     results['table'] = out_df.to_dict(orient='records')
     results['meta'] = response_meta
 
-    # ---------- Make JSON Safe ----------
+    #Make JSON Safe 
     def make_json_safe(obj):
         if isinstance(obj, (np.integer, np.int64, np.int32)):
             return int(obj)
